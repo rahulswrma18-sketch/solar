@@ -6,7 +6,8 @@
   --sun: #E89B0C;
   --wind: #14857A;
   --battery: #3C8D2F;
-  --ac: #6C4AB6;
+  --grid: #6C4AB6;
+  --out: #B83E6A;
   --ink: #1D2638;
   --ink-2: #566074;
   --paper: #F2F4F6;
@@ -39,7 +40,8 @@
     --sun: #F5AE2B;
     --wind: #2BB3A3;
     --battery: #5DB34D;
-    --ac: #9479E0;
+    --grid: #9479E0;
+    --out: #E06A95;
     --danger: #EF5B4F;
     --warn: #E39A2A;
   }
@@ -136,9 +138,9 @@ code { font-size: .9em; }
   transform-box: view-box;
   transition: transform .35s cubic-bezier(.4, 1.6, .6, 1);
 }
-.flow .row .blade { transform-origin: 300px var(--y); transform: rotate(-28deg); }
+.flow .row .blade { transform-origin: var(--ox) var(--oy); transform: rotate(-28deg); }
 .flow .row.closed .blade { transform: rotate(0deg); stroke: var(--c); }
-.flow .relay-tag { fill: var(--sky-ink-2); font: 500 13px var(--body); }
+.flow .relay-tag { fill: var(--sky-ink-2); font: 500 12px var(--body); }
 
 .flow .node-bg { fill: var(--panel); stroke: var(--c, var(--sky-ink)); stroke-width: 3; }
 .flow .load .node-bg { stroke: var(--sky-ink); }
@@ -149,7 +151,12 @@ code { font-size: .9em; }
 .flow .rotor { fill: var(--wind); }
 .flow .rotor.spin { animation: spin var(--rot, 3s) linear infinite; transform-box: fill-box; transform-origin: center; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.flow .icon-plug { fill: none; stroke: var(--ac); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.flow .icon-ac { fill: none; stroke: var(--grid); stroke-width: 3.5; stroke-linecap: round; }
+.flow .rank { fill: var(--out); font: 800 22px var(--display); }
+.flow .row.out.closed .node-bg { fill: color-mix(in srgb, var(--out) 14%, var(--panel)); }
+.flow .col-tag { fill: var(--sky-ink-2); font: 500 13px var(--body); }
+.flow #row-discharge .flowline { --c: var(--battery); }
+.flow #row-discharge.on .flowline { opacity: 1; }
 .flow .bat-shell { fill: none; stroke: var(--battery); stroke-width: 2.5; }
 .flow .bat-cap { fill: var(--battery); }
 .flow .bat-fill { fill: var(--battery); transition: height .8s, y .8s; }
@@ -248,6 +255,9 @@ h2 { font-size: 24px; }
 .pri-state { display: block; font-size: 13px; color: var(--ink-2); font-weight: 400; }
 .pri-item.feeding .pri-state { color: var(--battery); font-weight: 600; }
 .pri-item.unavailable { opacity: .55; }
+.pri-item .switch { margin-right: 4px; }
+.pri-item.on .pri-state { color: var(--out); font-weight: 600; }
+.pri-item.held .pri-state { color: var(--danger); }
 .pri-move { display: flex; gap: 4px; }
 .pri-move button {
   width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--rule);
@@ -290,7 +300,8 @@ h2 { font-size: 24px; }
 }
 .relay label { display: flex; align-items: center; gap: 10px; font-weight: 500; }
 .relay .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--c); }
-.relay .why { font-size: 13px; color: var(--danger); }
+.relay .why { font-size: 13px; color: var(--ink-2); }
+.relay .why.held { color: var(--danger); }
 .switch { position: relative; width: 52px; height: 30px; flex: none; }
 .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1; }
 .switch i {
@@ -396,9 +407,9 @@ footer {
 @media (max-width: 560px) {
   .sec-head .seg { width: 100%; }
   .sec-head .seg button { flex: 1; padding: 8px 6px; }
-  .flow .n-val { font-size: 34px; }
-  .flow .row .n-val { transform: translateY(-15px); }
-  .flow .n-name, .flow .relay-tag { display: none; }
+  .flow .n-val { font-size: 30px; }
+  .flow .row .n-val { transform: translateY(-12px); }
+  .flow .n-name, .flow .relay-tag, .flow .col-tag { display: none; }
   .flow svg { margin-top: 8px; }
   .prog { grid-template-columns: 1fr auto; }
   .prog .pattern { grid-column: 1 / -1; }

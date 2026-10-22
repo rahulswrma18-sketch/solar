@@ -1,5 +1,7 @@
 /* =========================================================
-   Smart Energy dashboard - app logic
+   Smart Energy dashboard - app logic  (v2)
+   Sources: Solar, Wind, Grid (AC) -> Battery (charging relay)
+   -> three priority outputs.
    Works in two ways:
      - FIREBASE: live data from the ESP32 (fill in firebase-config.js)
      - DEMO:     simulated data, so the UI can be tried right away
@@ -9,15 +11,17 @@
 
   const C = window.SEMS_CONFIG;
   const DEMO = !C || !C.firebase || String(C.firebase.apiKey).startsWith("YOUR");
-  const KEYS = ["battery", "ac", "solar", "wind"];
-  const KEY_NAME = { battery: "Battery", ac: "AC input", solar: "Solar", wind: "Wind" };
-  const KEY_LETTER = { battery: "B", ac: "AC", solar: "S", wind: "W" };
-  const KEY_COLOR = { battery: "var(--battery)", ac: "var(--ac)", solar: "var(--sun)", wind: "var(--wind)" };
-  const MODE_LABEL = { manual: "Manual", priority: "Priority", auto: "Auto (AI)" };
-  const RANK = ["1<small>st</small>", "2<small>nd</small>", "3<small>rd</small>", "4<small>th</small>"];
   const FIREBASE_VERSION = "10.12.2";
   const OFFLINE_AFTER_MS = 15000;
   const LIVE_POINTS = 300; // 10 min at 2 s
+
+  const SOURCES = ["solar", "wind", "grid", "charge"];
+  const OUTPUTS = ["out1", "out2", "out3"];
+  const ALL = [...SOURCES, ...OUTPUTS];
+  const NAME = { solar: "Solar", wind: "Wind", grid: "Grid (AC)", charge: "Battery charging", ...C.outputs };
+  const COLOR = { solar: "var(--sun)", wind: "var(--wind)", grid: "var(--grid)", charge: "var(--battery)" };
+  const RANK = ["1<small>st</small>", "2<small>nd</small>", "3<small>rd</small>"];
+  const allOff = () => Object.fromEntries(ALL.map((k) => [k, false]));
 
   const $ = (id) => document.getElementById(id);
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -26,7 +30,7 @@
 
   const state = {
     live: null,
-    control: { mode: "priority", relays: { battery: false, ac: false, solar: false, wind: false }, priority: ["solar", "wind", "battery", "ac"] },
+    control: { mode: "auto", relays: allOff() },
     events: [],
     liveBuf: [],
     history: null,
@@ -34,13 +38,13 @@
     range: "live",
     weather: null,
   };
+  const L = () => ({ ...C.limits, ...(state.live?.limits || {}) }); // limits from the ESP32 when known
 
   // =======================================================
   //  BACKENDS
   // =======================================================
   let backend;
 
-  // ---------- Firebase ----------
   async function firebaseBackend() {
     const base = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}`;
     const [appM, authM, dbM] = await Promise.all([
@@ -57,18 +61,13 @@
     authM.onAuthStateChanged(auth, (user) => {
       unsubs.forEach((u) => u());
       unsubs = [];
-      if (!user) {
-        $("login").hidden = false;
-        $("signOutBtn").hidden = true;
-        return;
-      }
+      if (!user) { $("login").hidden = false; $("signOutBtn").hidden = true; return; }
       $("login").hidden = true;
       $("signOutBtn").hidden = false;
-      unsubs.push(dbM.onValue(path("live"), (s) => onLive(s.val())));
+      unsubs.push(dbM.onValue(path("live"), (s) => onLive(s.val()), (e) => permissionHint(e)));
       unsubs.push(dbM.onValue(path("control"), (s) => onControl(s.val())));
       unsubs.push(dbM.onValue(dbM.query(path("events"), dbM.limitToLast(40)), (s) => {
-        const v = s.val() || {};
-        onEvents(Object.values(v).sort((a, b) => b.ts - a.ts));
+        onEvents(Object.values(s.val() || {}).sort((a, b) => b.ts - a.ts));
       }));
     });
 
@@ -86,9 +85,7 @@
     return {
       async writeControl(ctl) {
         await dbM.set(path("control"), {
-          mode: ctl.mode,
-          relays: ctl.relays,
-          priority: ctl.priority,
+          mode: ctl.mode, relays: ctl.relays,
           by: auth.currentUser ? auth.currentUser.email : "unknown",
           ts: dbM.serverTimestamp(),
         });
@@ -100,13 +97,20 @@
     };
   }
 
-  // ---------- Demo (a small simulated ESP32) ----------
+  function permissionHint(err) {
+    $("headline").textContent = "No permission to read the data";
+    $("headlineSub").textContent = "Add your user's UID to the 'allowed' list in the Realtime Database, then reload.";
+    console.error(err);
+  }
+
+  // ---------- Demo: a small simulated ESP32 (same rules as the firmware) ----------
   function demoBackend() {
     $("demoBanner").hidden = false;
-    let ctl = { mode: "priority", relays: { battery: false, ac: false, solar: true, wind: true }, priority: ["solar", "wind", "battery", "ac"] };
-    let batV = 12.55, windNow = 9, energy = 0.412, aiProg = 1, aiConf = 0.87, lastAi = 0, prioN = 1, lastPrio = 0;
-    let lastW = { solar: 0, wind: 0, battery: 0, ac: 0 }, prioAvail = { solar: true, wind: true, battery: true, ac: true };
+    let ctl = { mode: "auto", relays: allOff() };
+    let batV = 12.6, windNow = 11, gen = 0.512, level = 2, conf = 0.88, grid = false, lastDecide = 0;
+    let crit = false, full = false;
     const events = [{ ts: Date.now() - 60000, level: "info", msg: "Controller started (demo)" }];
+    const lim = C.limits;
 
     function sunNow() {
       const wx = state.weather;
@@ -114,59 +118,54 @@
       const h = new Date().getHours() + new Date().getMinutes() / 60;
       return Math.max(0, Math.sin(Math.PI * (h - 6) / 12)) * 800;
     }
+    function ruleLevel(v, solar, renew, fcRad, prev) {
+      const h = (n) => (prev >= n ? 0.2 : 0);
+      const o1 = v >= lim.out1 - h(1);
+      const o2 = o1 && (v >= lim.out2 - h(2) || renew >= lim.out2w || (v >= 12.1 && fcRad > 400));
+      const o3 = o2 && v >= lim.out3 - h(3) && solar >= lim.sunGood;
+      return +o1 + +o2 + +o3;
+    }
     function tick() {
       windNow = clamp(windNow + (Math.random() - 0.5) * 3, 0, 40);
-      // priority mode: same logic as updatePriority() on the ESP32
-      const sunW = 20 * sunNow() / 1000, windCap = 30 * Math.pow(clamp((windNow - 8) / 32, 0, 1), 3) * 4;
-      prioAvail = { solar: sunW > 0.5, wind: windCap > 0.3, battery: batV >= 12.0, ac: true };
-      const avail = ctl.priority.filter((k) => prioAvail[k]);
-      const loadEst = 9.5;
-      if (ctl.mode === "priority" && Date.now() - lastPrio > 4000) {
-        prioN = clamp(prioN, avail.length ? 1 : 0, avail.length);
-        const cap = { solar: sunW, wind: windCap, battery: 6, ac: 1000 };
-        const supplied = avail.slice(0, prioN).reduce((s, k) => s + cap[k], 0);
-        const lastCap = prioN ? cap[avail[prioN - 1]] : 0;
-        if (prioN < avail.length && supplied < loadEst * 1.05) prioN++;
-        else if (prioN > 1 && supplied - lastCap >= loadEst * 1.25) prioN--;
-        lastPrio = Date.now();
-      }
-      const prioRelays = { battery: false, ac: false, solar: false, wind: false };
-      avail.slice(0, prioN).forEach((k) => (prioRelays[k] = true));
-      const relays = { ...(ctl.mode === "auto" ? C.programs[aiProg].relays : ctl.mode === "priority" ? prioRelays : ctl.relays) };
-      const solarW = relays.solar ? 20 * sunNow() / 1000 * (0.9 + Math.random() * 0.1) : 0;
-      const windW = relays.wind ? 30 * Math.pow(clamp((windNow - 8) / 32, 0, 1), 3) * 4 : 0;
-      const loadW = 7 + Math.random() * 5;
-      const renew = solarW + windW;
-      let batI = 0;
-      if (relays.battery) batI = (loadW - renew) / batV;
-      else if (renew > loadW) batI = -(renew - loadW) / batV * 0.6;
-      batV = clamp(batV - batI * 0.002, 11.3, 13.9);
-      energy += loadW * 2 / 3600 / 1000;
+      const solarW = 20 * sunNow() / 1000 * (0.9 + Math.random() * 0.1);
+      const windW = 30 * Math.pow(clamp((windNow - 8) / 32, 0, 1), 3) * 4;
+      const fc = state.weather?.next || { cloud: 40, wind: 12, rad: sunNow() };
 
-      const fc = state.weather && state.weather.next ? state.weather.next : { cloud: 40, wind: 12, rad: sunNow() };
-      if (ctl.mode === "auto" && Date.now() - lastAi > 20000) {
-        const p = ruleProgram({ bat_v: batV, solar_w: 20 * sunNow() / 1000, wind_w: windW || 2, load_w: loadW, fc_rad: fc.rad, fc_wind: fc.wind });
-        if (p !== aiProg) events.unshift({ ts: Date.now(), level: "info", msg: `AI selected Program ${p} (model, ${Math.round(aiConf * 100)}%)` });
-        aiProg = p;
-        aiConf = 0.7 + Math.random() * 0.3;
-        lastAi = Date.now();
+      if (ctl.mode === "auto" && Date.now() - lastDecide > 15000) {
+        const nl = ruleLevel(batV, solarW, solarW + windW, fc.rad, level);
+        if (nl !== level) events.unshift({ ts: Date.now(), level: "info", msg: `Auto: ${nl} of 3 outputs on (model, ${Math.round(conf * 100)}%)` });
+        level = nl; conf = 0.75 + Math.random() * 0.25;
+        if (batV < lim.gridOn && solarW + windW < 5) grid = true;
+        if (batV >= lim.gridOff) grid = false;
+        lastDecide = Date.now();
         onEvents(events.slice(0, 40));
       }
-      const roof = 27 + sunNow() / 60, sys = 31 + loadW / 3;
+      if (batV < lim.critical) crit = true; if (batV > 11.8) crit = false;
+      if (batV >= lim.chargeOff) full = true; if (batV < lim.chargeOn) full = false;
+
+      const r = ctl.mode === "auto"
+        ? { solar: true, wind: true, grid, charge: true, out1: level >= 1, out2: level >= 2, out3: level >= 3 }
+        : { ...ctl.relays };
+      if (full) r.charge = false;
+      if (crit) r.out1 = r.out2 = r.out3 = false;
+
+      const draw = (r.out1 ? 4 : 0) + (r.out2 ? 6 : 0) + (r.out3 ? 8 : 0);
+      const inW = (r.solar ? solarW : 0) + (r.wind ? windW : 0) + (r.grid ? 15 : 0);
+      const chargeW = r.charge ? Math.max(0, inW - draw) : 0;
+      const batI = (draw - (r.charge ? inW : 0)) / batV;   // + = discharging
+      batV = clamp(batV - batI * 0.003 + (Math.random() - 0.5) * 0.004, 11.2, 14.5);
+      gen += ((r.solar ? solarW : 0) + (r.wind ? windW : 0)) * 2 / 3600 / 1000;
+
       onLive({
-        ts: Date.now(), fw: "demo", uptime: 0, rssi: -58,
+        ts: Date.now(), fw: "demo", rssi: -58,
         battery: { v: batV, i: batI, w: batV * batI, soc: clamp((batV - 11.8) / 0.9 * 100, 0, 100), ok: true },
-        solar: { v: solarW ? 17.6 : 0, i: solarW / 17.6, w: solarW, ok: true },
-        wind: { v: windW ? 14.2 : 0, i: windW / 14.2, w: windW, ok: true },
-        load: { v: batV, i: loadW / batV, w: loadW, ok: true },
-        temp: { roof, system: sys },
-        energyKwh: energy,
-        mode: ctl.mode,
-        program: matchProgram(relays),
-        relays,
-        priority: [...ctl.priority], prioActive: prioN, prioAvail: { ...prioAvail },
-        ai: { program: aiProg, confidence: aiConf, source: "model", model: "RF 15 trees (demo)", fc_cloud: fc.cloud, fc_wind: fc.wind, fc_rad: fc.rad, fc_valid: true },
-        safety: { batLow: false, batHigh: false, overTemp: false, sensorFault: false },
+        solar: { v: solarW ? 17.6 : 0, i: solarW / 17.6, w: r.solar ? solarW : 0, ok: true },
+        wind: { v: windW ? 14.2 : 0, i: windW / 14.2, w: r.wind ? windW : 0, ok: true },
+        temp: { panel: 27 + sunNow() / 40, system: 31 + draw / 4 },
+        genKwh: gen, mode: ctl.mode, relays: r, chargeW,
+        ai: { level, confidence: conf, source: "model", model: "RF 15 trees (demo)", fc_cloud: fc.cloud, fc_wind: fc.wind, fc_rad: fc.rad, fc_valid: true },
+        safety: { batCritical: crit, batFull: full, overTemp: false, sensorFault: false },
+        limits: lim,
       });
     }
     setTimeout(() => { onControl(ctl); onEvents(events); tick(); }, 50);
@@ -177,11 +176,10 @@
         const was = ctl.mode;
         ctl = JSON.parse(JSON.stringify(next));
         if (was !== ctl.mode) events.unshift({ ts: Date.now(), level: "info", msg: `Switched to ${ctl.mode.toUpperCase()} mode` });
-        if (ctl.mode === "auto") lastAi = 0;
-        if (ctl.mode === "priority") { prioN = 1; lastPrio = 0; }
+        if (ctl.mode === "auto") lastDecide = 0;
         onControl(ctl);
         onEvents(events.slice(0, 40));
-        setTimeout(tick, 600);
+        setTimeout(tick, 500);
       },
       async loadHistory() {
         const rows = [], now = Date.now();
@@ -191,34 +189,13 @@
           const sun = Math.max(0, Math.sin(Math.PI * (h - 6) / 12));
           w = clamp(w + (Math.random() - 0.5) * 4, 0, 35);
           const solar = 18 * sun * (0.7 + Math.random() * 0.3), wind = 30 * Math.pow(clamp((w - 8) / 32, 0, 1), 3) * 4;
-          const load = 7 + Math.random() * 5;
-          v = clamp(v + (solar + wind - load) * 0.002, 11.6, 13.8);
-          rows.push({ ts: t, bat_v: v, solar_w: solar, wind_w: wind, load_w: load, roof_temp: 26 + sun * 14, sys_temp: 30 + load / 3 });
+          v = clamp(v + (solar + wind - 10) * 0.002, 11.6, 14.2);
+          rows.push({ ts: t, bat_v: v, bat_i: (10 - solar - wind) / v, solar_w: solar, wind_w: wind, panel_temp: 26 + sun * 20, sys_temp: 31 + sun * 4 });
         }
         return rows;
       },
     };
   }
-
-  // Same rule as the ESP32 fallback and ai/sems_common.py
-  function ruleProgram(r) {
-    const renew = r.solar_w + r.wind_w, load = r.load_w;
-    const coming = r.fc_rad > 300 || r.fc_wind > 20;
-    if (r.bat_v < 11.6) return renew >= load ? 1 : 3;
-    if (renew >= load) return 1;
-    if (r.bat_v >= 12.4) return 2;
-    if (r.bat_v >= 11.9 && coming) return 2;
-    return 3;
-  }
-
-  function matchProgram(relays) {
-    if (KEYS.every((k) => !relays[k])) return 0;
-    for (const [n, p] of Object.entries(C.programs)) {
-      if (KEYS.every((k) => !!p.relays[k] === !!relays[k])) return +n;
-    }
-    return -1;
-  }
-  const programName = (n) => (n === 0 ? "All off" : n > 0 && C.programs[n] ? `Program ${n}` : "Custom");
 
   // =======================================================
   //  DATA IN
@@ -228,9 +205,9 @@
     state.live = live;
     state.liveBuf.push({
       t: live.ts || Date.now(),
-      solar: +live.solar?.w || 0, wind: +live.wind?.w || 0, load: +live.load?.w || 0,
-      battery: +live.battery?.w || 0, batV: +live.battery?.v || null, soc: +live.battery?.soc || null,
-      roof: live.temp?.roof !== undefined ? +live.temp.roof : null,
+      solar: +live.solar?.w || 0, wind: +live.wind?.w || 0,
+      battery: +live.battery?.w || 0, batV: +live.battery?.v || null,
+      panel: live.temp?.panel !== undefined ? +live.temp.panel : null,
       sys: live.temp?.system !== undefined ? +live.temp.system : null,
     });
     if (state.liveBuf.length > LIVE_POINTS) state.liveBuf.shift();
@@ -239,47 +216,34 @@
   }
   function onControl(ctl) {
     if (!ctl) return;
-    const pr = Array.isArray(ctl.priority) && ctl.priority.length === 4 ? ctl.priority : state.control.priority;
-    state.control = { mode: ctl.mode || "priority", relays: { ...state.control.relays, ...(ctl.relays || {}) }, priority: [...pr] };
+    state.control = { mode: ctl.mode === "manual" ? "manual" : "auto", relays: { ...allOff(), ...(ctl.relays || {}) } };
     renderControl();
   }
-  function onEvents(list) {
-    state.events = list || [];
-    renderEvents();
-  }
+  function onEvents(list) { state.events = list || []; renderEvents(); }
 
   // =======================================================
   //  RENDER
   // =======================================================
-  function isOnline() {
-    if (DEMO) return true;
-    return state.live && state.live.ts && Date.now() - state.live.ts < OFFLINE_AFTER_MS;
-  }
+  const isOnline = () => DEMO || (state.live?.ts && Date.now() - state.live.ts < OFFLINE_AFTER_MS);
+  const outsOn = (r) => OUTPUTS.filter((k) => r && r[k]);
 
   function headline(l) {
-    const s = l.safety || {}, r = l.relays || {};
-    const solarOn = r.solar && +l.solar.w > 0.3, windOn = r.wind && +l.wind.w > 0.3;
+    const s = l.safety || {}, r = l.relays || {}, n = outsOn(r).length;
     if (s.overTemp) return ["Too hot, so everything is off", `System temperature is ${fmt(l.temp?.system)} °C. It turns back on below 50 °C.`];
-    if (s.sensorFault) return ["Battery sensor is not responding", "The battery relay is held off until the INA219 answers again."];
-    if (KEYS.every((k) => !r[k])) return ["Everything is off", "No source is connected to the load."];
+    if (s.sensorFault) return ["Battery sensor is not responding", "Charging and outputs are held off until the INA226 (0x45) answers again."];
+    if (s.batCritical) return ["Battery is very low, so all outputs are off", `Outputs come back when the battery recovers above 11.8 V.${r.grid ? " The grid is charging it now." : ""}`];
     let h;
-    if (r.ac && !r.battery && !solarOn && !windOn) h = "Running on AC backup";
-    else if (r.battery && (solarOn || windOn)) h = "Battery is helping " + (solarOn && windOn ? "the sun and wind" : solarOn ? "the panel" : "the turbine");
-    else if (r.battery) h = "Running on the battery";
-    else if (solarOn && windOn) h = "Running on sun and wind";
-    else if (solarOn) h = "Running on sunshine";
-    else if (windOn) h = "Running on wind";
-    else if (r.solar || r.wind) h = "Waiting for sun or wind";
-    else h = "Running on AC backup";
-    if (r.ac && h !== "Running on AC backup") h += ", with AC backup";
-    if (s.batLow) h = "Battery is low, so it's cut off";
-    if (s.batHigh) h = "Battery is full, so sun and wind are paused";
-
-    const renew = (+l.solar.w || 0) + (+l.wind.w || 0);
-    let sub = `The load uses ${fmt(l.load.w)} W and sun and wind give ${fmt(renew)} W. `;
-    if (l.mode === "auto") sub += `Auto mode picked ${programName(l.ai?.program)} with ${Math.round((+l.ai?.confidence || 0) * 100)}% agreement.`;
-    else if (l.mode === "priority") { const n = l.prioActive || 0; sub += n === 0 ? "Priority mode: no source on your list is available." : n === 1 ? "Priority mode is using the 1st available source on your list." : `Priority mode is using the top ${n} available sources on your list.`; }
-    else sub += "Manual mode: you're choosing the sources.";
+    if (n === 3) h = "All three outputs are on";
+    else if (n === 0) h = "All outputs are off";
+    else if (n === 1 && r.out1) h = `Only ${NAME.out1} is on`;
+    else h = `${n} of 3 outputs are on`;
+    const renew = (+l.solar?.w || 0) + (+l.wind?.w || 0);
+    let sub = `Sun and wind give ${fmt(renew)} W. `;
+    if (r.grid) sub += "The grid is backing up the battery. ";
+    else if (s.batFull) sub += "The battery is full, so charging is paused. ";
+    sub += l.mode === "auto"
+      ? `Auto mode chose this with ${Math.round((+l.ai?.confidence || 0) * 100)}% agreement.`
+      : "Manual mode: you're choosing what's on.";
     return [h, sub];
   }
 
@@ -287,19 +251,15 @@
     const l = state.live;
     if (!l) return;
     const online = isOnline();
-
-    // connection
     const conn = $("conn");
     conn.className = "conn " + (online ? "online" : "offline");
     $("connText").textContent = DEMO ? "Demo" : online ? "Live" : `Offline, last seen ${ago(l.ts)}`;
 
-    // headline
     const [h, sub] = online ? headline(l) : ["Controller is offline", `The last reading arrived ${ago(l.ts)}. Check the ESP32's power and Wi-Fi.`];
     $("headline").textContent = h;
     $("headlineSub").textContent = sub;
-    $("heroMode").textContent = MODE_LABEL[l.mode] || "–";
-    const onList = KEYS.filter((k) => l.relays && l.relays[k]).map((k) => KEY_NAME[k]);
-    $("heroProgram").textContent = onList.length ? onList.join(" + ") : "None";
+    $("heroMode").textContent = l.mode === "auto" ? "Auto (AI)" : "Manual";
+    $("heroOutputs").textContent = `${outsOn(l.relays).length} of 3`;
 
     renderFlow(l, online);
     renderReadings(l);
@@ -310,203 +270,177 @@
     $("footFw").textContent = l.fw ? `Firmware ${l.fw}` : "";
   }
 
+  function setFlow(row, closed, flowing, watts, reverse) {
+    const el = $(row);
+    if (el.dataset.ox) { el.style.setProperty("--ox", el.dataset.ox + "px"); el.style.setProperty("--oy", el.dataset.oy + "px"); }
+    el.classList.toggle("closed", closed);
+    el.classList.toggle("on", flowing);
+    el.classList.toggle("rev", !!reverse);
+    el.style.setProperty("--speed", clamp(2.4 - watts / 8, 0.45, 2.4).toFixed(2) + "s");
+  }
+
   function renderFlow(l, online) {
     const r = l.relays || {};
-    const power = { solar: +l.solar?.w || 0, wind: +l.wind?.w || 0, battery: Math.abs(+l.battery?.w || 0), ac: r.ac ? 10 : 0 };
-    for (const k of KEYS) {
-      const row = $(`row-${k}`);
-      row.style.setProperty("--y", row.dataset.y + "px");
-      row.classList.toggle("closed", !!r[k]);
-      const flowing = online && r[k] && power[k] > 0.3;
-      row.classList.toggle("on", flowing);
-      row.style.setProperty("--speed", clamp(2.4 - power[k] / 8, 0.45, 2.4).toFixed(2) + "s");
-    }
-    // battery charging -> flow runs from the bus into the battery
-    $("row-battery").classList.toggle("rev", (+l.battery?.i || 0) < -0.02);
-    $("flow-load").classList.toggle("on", online && (+l.load?.w || 0) > 0.3);
-    $("flow-load").style.setProperty("--speed", clamp(2.4 - (+l.load?.w || 0) / 8, 0.45, 2.4).toFixed(2) + "s");
+    const sw = +l.solar?.w || 0, ww = +l.wind?.w || 0, bi = +l.battery?.i || 0, bw = Math.abs(+l.battery?.w || 0);
+    setFlow("row-solar", !!r.solar, online && r.solar && sw > 0.3, sw);
+    setFlow("row-wind", !!r.wind, online && r.wind && ww > 0.3, ww);
+    setFlow("row-grid", !!r.grid, online && !!r.grid, 15);
+    setFlow("row-charge", !!r.charge, online && r.charge && bi < -0.02, bw);
+    const anyOut = outsOn(r).length > 0;
+    setFlow("row-discharge", true, online && anyOut, bw);
+    OUTPUTS.forEach((k) => setFlow(`row-${k}`, !!r[k], online && !!r[k], 8));
 
     const rotor = $("rotor");
-    rotor.classList.toggle("spin", online && power.wind > 0.2);
-    rotor.style.setProperty("--rot", clamp(3.5 - power.wind / 5, 0.35, 3.5).toFixed(2) + "s");
+    rotor.classList.toggle("spin", online && ww > 0.2);
+    rotor.style.setProperty("--rot", clamp(3.5 - ww / 5, 0.35, 3.5).toFixed(2) + "s");
 
-    $("v-solar").textContent = `${fmt(l.solar?.w)} W`;
-    $("v-wind").textContent = `${fmt(l.wind?.w)} W`;
-    $("v-ac").textContent = r.ac ? "on" : "off";
+    $("v-solar").textContent = `${fmt(sw)} W`;
+    $("v-wind").textContent = `${fmt(ww)} W`;
+    $("v-grid").textContent = r.grid ? "on" : "off";
     $("v-battery").textContent = `${fmt(l.battery?.v, 2)} V`;
-    $("v-load").textContent = `${fmt(l.load?.w)} W`;
-    const soc = clamp(+l.battery?.soc || 0, 0, 100), hgt = 24 * soc / 100;
-    const fill = $("batFill");
+    $("v-battery-sub").textContent = Math.abs(bi) < 0.02 ? "Idle" : bi < 0 ? `Charging ${fmt(-bi, 2)} A` : `Discharging ${fmt(bi, 2)} A`;
+    OUTPUTS.forEach((k) => { $(`v-${k}`).textContent = r[k] ? "on" : "off"; $(`name-${k}`).textContent = NAME[k]; });
+    const soc = clamp(+l.battery?.soc || 0, 0, 100), hgt = 24 * soc / 100, fill = $("batFill");
     fill.setAttribute("height", hgt.toFixed(1));
     fill.setAttribute("y", (12 - hgt).toFixed(1));
   }
 
   function renderReadings(l) {
-    const soc = Math.round(+l.battery?.soc || 0);
-    const ring = $("socRing");
+    const soc = Math.round(+l.battery?.soc || 0), ring = $("socRing");
     ring.style.setProperty("--p", soc);
     ring.classList.toggle("low", soc < 20);
     $("socText").textContent = `${soc}%`;
     $("r-bat-v").textContent = fmt(l.battery?.v, 2);
     const bi = +l.battery?.i || 0;
-    $("r-bat-i").textContent = Math.abs(bi) < 0.02 ? "Idle" : bi > 0 ? `Discharging ${fmt(bi, 2)} A` : `Charging ${fmt(-bi, 2)} A`;
+    $("r-bat-i").textContent = l.battery?.ok === false ? "Sensor missing" : Math.abs(bi) < 0.02 ? "Idle" : bi > 0 ? `Discharging ${fmt(bi, 2)} A` : `Charging ${fmt(-bi, 2)} A`;
     $("r-sol-w").textContent = fmt(l.solar?.w);
-    $("r-sol-vi").textContent = l.solar?.ok === false ? "Sensor missing" : `${fmt(l.solar?.v)} V, ${fmt(l.solar?.i, 2)} A`;
+    $("r-sol-vi").textContent = l.solar?.ok === false ? "Sensor missing (0x44)" : `${fmt(l.solar?.v)} V, ${fmt(l.solar?.i, 2)} A`;
     $("r-wind-w").textContent = fmt(l.wind?.w);
-    $("r-wind-vi").textContent = l.wind?.ok === false ? "Sensor missing" : `${fmt(l.wind?.v)} V, ${fmt(l.wind?.i, 2)} A`;
-    $("r-load-w").textContent = fmt(l.load?.w);
-    $("r-energy").textContent = `${fmt(l.energyKwh, 3)} kWh used in total`;
-    $("r-roof").textContent = l.temp?.roof !== undefined ? `${fmt(l.temp.roof)} °C` : "–";
+    $("r-wind-vi").textContent = l.wind?.ok === false ? "Sensor missing (0x40)" : `${fmt(l.wind?.v)} V, ${fmt(l.wind?.i, 2)} A`;
+    $("r-gen").textContent = fmt(l.genKwh, 3);
+    $("r-panel").textContent = l.temp?.panel !== undefined ? `${fmt(l.temp.panel)} °C` : "–";
     $("r-sys").textContent = l.temp?.system !== undefined ? `${fmt(l.temp.system)} °C` : "–";
-    $("r-temp-note").textContent = `System turns off above ${C.limits.sysTempMax} °C`;
+    $("r-temp-note").textContent = `Everything turns off above ${L().tempMax} °C`;
   }
 
   function renderAlerts(l, online) {
-    const s = l.safety || {}, bar = $("alertBar");
+    const s = l.safety || {}, bar = $("alertBar"), lim = L();
     let msg = "", warn = false;
     if (!online && !DEMO) { msg = "No data from the controller for over 15 seconds. Relays keep their last state; safety limits still run on the ESP32."; warn = true; }
-    if (s.batHigh) { msg = `Battery is above ${C.limits.batHigh} V. Solar and wind are cut off to stop over-charging.`; warn = true; }
-    if (s.batLow) msg = `Battery dropped below ${C.limits.batLow} V. The battery output is cut off until it recovers to 12.0 V.`;
-    if (s.sensorFault) msg = "The battery INA219 is not responding. Check its wiring and I2C address (0x40).";
-    if (s.overTemp) msg = `System temperature passed ${C.limits.sysTempMax} °C. Everything is off until it cools below 50 °C.`;
+    if (s.batCritical) msg = `Battery dropped below ${lim.critical} V. All outputs are off until it recovers above 11.8 V.`;
+    if (s.sensorFault) msg = "The battery INA226 (0x45) is not responding. Check its wiring and address.";
+    if (s.overTemp) msg = `System temperature passed ${lim.tempMax} °C. Everything is off until it cools below 50 °C.`;
     bar.hidden = !msg;
     bar.textContent = msg;
     bar.classList.toggle("warn", warn);
   }
 
   // ---------- control ----------
-  function renderPrograms() {
-    const box = $("programs");
-    box.innerHTML = "";
-    for (const [n, p] of Object.entries(C.programs)) {
-      const el = document.createElement("div");
-      el.className = "prog";
-      el.dataset.prog = n;
-      const pat = KEYS.map((k) => `<span class="${p.relays[k] ? "on" : ""}" style="--c: var(--${k === "ac" ? "ac" : k === "solar" ? "sun" : k})" title="${KEY_NAME[k]} ${p.relays[k] ? "on" : "off"}">${KEY_LETTER[k]}</span>`).join("");
-      el.innerHTML = `
-        <div class="pattern" aria-hidden="true">${pat}</div>
-        <div><h3>Program ${n}: ${p.name}<span class="badge" hidden>AI choice</span></h3><p>${p.note}</p></div>
-        <button class="use" data-prog="${n}">Use</button>`;
-      box.appendChild(el);
-    }
-    box.addEventListener("click", (e) => {
-      const b = e.target.closest("button.use");
-      if (!b) return;
-      const p = C.programs[b.dataset.prog];
-      send({ mode: "manual", relays: { ...p.relays } }, `Program ${b.dataset.prog} sent.` + (state.control.mode !== "manual" ? " Switched to manual mode." : ""));
-    });
+  function outputReason(k, l) {
+    const lim = L(), s = l?.safety || {}, v = +l?.battery?.v || 0;
+    const renew = (+l?.solar?.w || 0) + (+l?.wind?.w || 0);
+    const on = !!l?.relays?.[k];
+    if (s.overTemp) return [false, "Held off: system too hot"];
+    if (s.batCritical) return [false, `Held off: battery below ${lim.critical} V`];
+    if (state.control.mode === "manual") return [false, on ? "On, set by you" : "Off, set by you"];
+    if (on) return [false, "On"];
+    if (k === "out1") return [false, `Off: battery ${fmt(v, 2)} V, needs ${lim.out1} V`];
+    if (k === "out2") return [false, `Off: needs battery ${lim.out2} V or sun + wind ${lim.out2w} W (now ${fmt(v, 2)} V, ${fmt(renew)} W)`];
+    return [false, `Off: needs battery ${lim.out3} V and solar ${lim.sunGood} W (now ${fmt(v, 2)} V, ${fmt(l?.solar?.w)} W)`];
   }
 
-  function renderRelays() {
-    const box = $("relayList");
-    box.innerHTML = "";
-    for (const k of KEYS) {
-      const color = k === "solar" ? "var(--sun)" : `var(--${k})`;
-      const row = document.createElement("div");
-      row.className = "relay";
-      row.style.setProperty("--c", color);
-      row.innerHTML = `
-        <label for="sw-${k}"><span class="dot"></span>${KEY_NAME[k]} <span class="why" id="why-${k}"></span></label>
-        <span class="switch"><input type="checkbox" role="switch" id="sw-${k}" data-key="${k}" /><i></i></span>`;
-      box.appendChild(row);
-    }
-    box.addEventListener("change", (e) => {
-      const k = e.target.dataset.key;
-      if (!k) return;
-      const base = state.control.mode !== "manual" && state.live ? state.live.relays : state.control.relays;
-      const relays = { ...base, [k]: e.target.checked };
-      send({ mode: "manual", relays }, `${KEY_NAME[k]} turned ${e.target.checked ? "on" : "off"}.` + (state.control.mode !== "manual" ? " Switched to manual mode." : ""));
-    });
-  }
-
-  function renderPriority() {
-    const ctl = state.control, l = state.live, ol = $("priorityList");
-    const live = ctl.mode === "priority";
-    $("priorityBox").classList.toggle("live", live);
+  function buildLists() {
+    const ol = $("outputList");
     ol.innerHTML = "";
-    ctl.priority.forEach((k, i) => {
-      const avail = l?.prioAvail ? l.prioAvail[k] !== false : true;
-      const on = !!(l?.relays && l.relays[k]);
-      let stateTxt;
-      if (!live) stateTxt = "Used in Priority mode";
-      else if (!avail) stateTxt = k === "battery" ? "Not available, battery below 12.0 V" : "Not available right now";
-      else stateTxt = on ? "Feeding the load" : "Standby, not needed now";
+    OUTPUTS.forEach((k, i) => {
       const li = document.createElement("li");
-      li.className = "pri-item" + (live && on ? " feeding" : "") + (live && !avail ? " unavailable" : "");
-      li.style.setProperty("--c", KEY_COLOR[k]);
+      li.className = "pri-item";
+      li.id = `pri-${k}`;
+      li.style.setProperty("--c", "var(--out)");
       li.innerHTML = `<span class="pri-rank">${RANK[i]}</span>
-        <span class="pri-name">${KEY_NAME[k]}<span class="pri-state">${stateTxt}</span></span>
-        <span class="pri-move">
-          <button data-move="-1" data-i="${i}" ${i === 0 ? "disabled" : ""} aria-label="Move ${KEY_NAME[k]} up">&#8593;</button>
-          <button data-move="1" data-i="${i}" ${i === 3 ? "disabled" : ""} aria-label="Move ${KEY_NAME[k]} down">&#8595;</button>
-        </span>`;
+        <label class="pri-name" for="sw-${k}">${NAME[k]}<span class="pri-state" id="why-${k}"></span></label>
+        <span class="switch" style="--c: var(--out)"><input type="checkbox" role="switch" id="sw-${k}" data-key="${k}" /><i></i></span>`;
       ol.appendChild(li);
     });
+    const box = $("relayList");
+    box.innerHTML = "";
+    SOURCES.forEach((k) => {
+      const row = document.createElement("div");
+      row.className = "relay";
+      row.style.setProperty("--c", COLOR[k]);
+      row.innerHTML = `<label for="sw-${k}"><span class="dot"></span>${NAME[k]} <span class="why" id="why-${k}"></span></label>
+        <span class="switch"><input type="checkbox" role="switch" id="sw-${k}" data-key="${k}" /><i></i></span>`;
+      box.appendChild(row);
+    });
+    const onSwitch = (e) => {
+      const k = e.target.dataset.key;
+      if (!k) return;
+      const base = state.control.mode === "auto" && state.live ? state.live.relays : state.control.relays;
+      const relays = { ...allOff(), ...base, [k]: e.target.checked };
+      send({ mode: "manual", relays }, `${NAME[k]} turned ${e.target.checked ? "on" : "off"}.` + (state.control.mode === "auto" ? " Switched to manual mode." : ""));
+    };
+    ol.addEventListener("change", onSwitch);
+    box.addEventListener("change", onSwitch);
   }
 
   function renderControl() {
-    const ctl = state.control, l = state.live;
+    const ctl = state.control, l = state.live, s = l?.safety || {};
     $("modeManual").setAttribute("aria-checked", ctl.mode === "manual");
-    $("modePriority").setAttribute("aria-checked", ctl.mode === "priority");
     $("modeAuto").setAttribute("aria-checked", ctl.mode === "auto");
-    $("modeHint").textContent = {
-      auto: "The AI on the ESP32 picks a program every minute. Pick a program or flip a relay to take over in manual mode.",
-      priority: "Sources turn on in your order until the load is covered. Use the arrows to change the order.",
-      manual: "You choose each source. Switch to Priority or Auto to let the system decide.",
-    }[ctl.mode];
-    renderPriority();
-
-    const active = l ? l.program : null, aiProg = l?.ai?.program;
-    document.querySelectorAll(".prog").forEach((el) => {
-      const n = +el.dataset.prog;
-      el.classList.toggle("active", n === active);
-      el.querySelector(".badge").hidden = !(ctl.mode === "auto" && n === aiProg);
-      el.querySelector(".use").textContent = n === active ? "Active" : "Use";
-    });
-
-    const shown = ctl.mode !== "manual" && l ? l.relays : ctl.relays;
-    const s = l?.safety || {};
-    const forced = { battery: s.batLow || s.sensorFault || s.overTemp, ac: s.overTemp, solar: s.batHigh || s.overTemp, wind: s.batHigh || s.overTemp };
-    for (const k of KEYS) {
+    $("modeHint").textContent = ctl.mode === "auto"
+      ? "The ESP32 decides every minute: Solar and Wind stay on, Grid backs up a low battery, and the AI picks how many outputs to keep on. Flip any switch to take over in manual mode."
+      : "You choose what's on. Safety limits still apply. Switch to Auto to let the system decide.";
+    const shown = ctl.mode === "auto" && l ? l.relays : ctl.relays;
+    for (const k of ALL) {
       const sw = $(`sw-${k}`);
-      if (!sw) continue;
-      sw.checked = !!(shown && shown[k]);
-      $(`why-${k}`).textContent = forced[k] ? "held off by safety" : "";
+      if (sw) sw.checked = !!(shown && shown[k]);
     }
+    OUTPUTS.forEach((k) => {
+      const li = $(`pri-${k}`);
+      const [, why] = outputReason(k, l);
+      $(`why-${k}`).textContent = why;
+      li.classList.toggle("on", !!l?.relays?.[k]);
+      li.classList.toggle("held", !!(s.batCritical || s.overTemp));
+    });
+    const lim = L();
+    $("why-solar").textContent = s.overTemp ? "held off: too hot" : "";
+    $("why-wind").textContent = s.overTemp ? "held off: too hot" : "";
+    $("why-grid").textContent = s.overTemp ? "held off: too hot" : ctl.mode === "auto" ? `auto: on below ${lim.gridOn} V` : "";
+    $("why-charge").textContent = s.overTemp ? "held off: too hot" : s.batFull ? `held off: battery full (${lim.chargeOff} V)` : s.sensorFault ? "held off: no battery sensor" : "";
+    SOURCES.forEach((k) => { const w = $(`why-${k}`); w.classList.toggle("held", w.textContent.startsWith("held")); });
+    $("safetyNote").textContent = `Safety limits on the ESP32 always win: below ${lim.critical} V all outputs turn off, at ${lim.chargeOff} V charging stops, above ${lim.tempMax} °C everything turns off.`;
   }
 
   // ---------- AI ----------
   function renderAI(l) {
-    const ai = l.ai || {};
-    const p = ai.program;
-    $("aiChoice").textContent = p > 0 && C.programs[p] ? `Program ${p}` : "–";
+    const ai = l.ai || {}, lim = L(), lvl = +ai.level || 0;
+    $("aiChoice").textContent = lvl === 0 ? "no outputs" : lvl === 1 ? "1 output" : `${lvl} outputs`;
     const conf = Math.round((+ai.confidence || 0) * 100);
     $("confBar").style.width = conf + "%";
     $("confText").textContent = conf + "%";
     $("aiSource").textContent = ai.source === "model"
       ? "Decided by the Random Forest running on the ESP32."
-      : ai.source === "rule" ? "Decided by the built-in rule. The model waits for the first weather forecast." : "No decision yet.";
+      : ai.source === "rule" ? "Decided by the built-in rules. The AI waits for the first weather forecast." : "No decision yet.";
     $("aiModel").textContent = ai.model ? `Model: ${ai.model}.` + (l.mode !== "auto" ? " Auto mode is off, so this choice is not applied." : "") : "";
 
-    const v = +l.battery?.v || 0, renew = (+l.solar?.w || 0) + (+l.wind?.w || 0), load = +l.load?.w || 0;
-    const batWord = v < 11.6 ? "low, protect it" : v < 12.0 ? "getting low" : v < 12.4 ? "OK" : v > 13.8 ? "full" : "healthy";
-    const gap = renew - load;
+    const v = +l.battery?.v || 0, sw = +l.solar?.w || 0, renew = sw + (+l.wind?.w || 0);
     const rad = +ai.fc_rad || 0, wnd = +ai.fc_wind || 0;
     const items = [
-      { c: "var(--battery)", b: `${fmt(v, 2)} V`, t: `Battery is ${batWord}` },
-      { c: "var(--sun)", b: `${fmt(renew)} W`, t: gap >= 0 ? `Sun and wind cover the ${fmt(load)} W load` : `Sun and wind are ${fmt(-gap)} W short of the load` },
-      { c: "var(--sun)", b: `${fmt(rad, 0)} W/m²`, t: rad > 300 ? "Good sun expected next hour" : rad > 50 ? "Some sun expected next hour" : "Little or no sun next hour" },
+      { c: "var(--battery)", b: `${fmt(v, 2)} V`, t: v >= lim.out3 ? `Battery is full enough for Output 3 (${lim.out3} V)` : v >= lim.out2 ? `Battery is enough for Output 2 (${lim.out2} V)` : v >= lim.out1 ? `Battery is enough for Output 1 only (${lim.out1} V)` : `Battery is too low for any output (${lim.out1} V)` },
+      { c: "var(--sun)", b: `${fmt(renew)} W`, t: renew >= lim.out2w ? `Sun and wind give at least ${lim.out2w} W, enough for Output 2` : `Sun and wind give less than ${lim.out2w} W` },
+      { c: "var(--sun)", b: `${fmt(sw)} W`, t: sw >= lim.sunGood ? `Solar is strong (${lim.sunGood} W or more)` : `Solar is below ${lim.sunGood} W, so Output 3 waits` },
+      { c: "var(--sun)", b: `${fmt(rad, 0)} W/m²`, t: rad > 400 ? "Good sun expected next hour" : rad > 50 ? "Some sun expected next hour" : "Little or no sun next hour" },
       { c: "var(--wind)", b: `${fmt(wnd)} km/h`, t: wnd > 20 ? "Strong wind expected next hour" : "Light wind expected next hour" },
-      { c: "var(--ink)", b: `${fmt(ai.fc_cloud, 0)}%`, t: "Cloud cover next hour" },
     ];
-    $("aiReasons").innerHTML = "";
+    const ul = $("aiReasons");
+    ul.innerHTML = "";
     for (const it of items) {
       const li = document.createElement("li");
       li.style.setProperty("--c", it.c);
       const sp = document.createElement("span"); sp.textContent = it.t;
       const b = document.createElement("b"); b.textContent = it.b;
       li.append(sp, b);
-      $("aiReasons").appendChild(li);
+      ul.appendChild(li);
     }
   }
 
@@ -531,18 +465,16 @@
   //  CHART
   // =======================================================
   let chart;
-  function chartSets(rows, kind, isHist) {
-    const g = (r, a, b) => (isHist ? r[b] : r[a]);
+  function chartSets(rows, kind, hist) {
+    const g = (r, a, b) => (hist ? r[b] : r[a]);
     if (kind === "power") return [
       { label: "Solar (W)", color: css("--sun"), data: rows.map((r) => g(r, "solar", "solar_w")) },
       { label: "Wind (W)", color: css("--wind"), data: rows.map((r) => g(r, "wind", "wind_w")) },
-      { label: "Load (W)", color: css("--ink"), data: rows.map((r) => g(r, "load", "load_w")) },
+      { label: "Battery (W, + = discharging)", color: css("--battery"), data: rows.map((r) => (hist ? r.bat_v * r.bat_i : r.battery)) },
     ];
-    if (kind === "battery") return [
-      { label: "Battery voltage (V)", color: css("--battery"), data: rows.map((r) => g(r, "batV", "bat_v")) },
-    ];
+    if (kind === "battery") return [{ label: "Battery voltage (V)", color: css("--battery"), data: rows.map((r) => g(r, "batV", "bat_v")) }];
     return [
-      { label: "Roof (°C)", color: css("--sun"), data: rows.map((r) => g(r, "roof", "roof_temp")) },
+      { label: "Panel (°C)", color: css("--sun"), data: rows.map((r) => g(r, "panel", "panel_temp")) },
       { label: "System (°C)", color: css("--danger"), data: rows.map((r) => g(r, "sys", "sys_temp")) },
     ];
   }
@@ -550,7 +482,8 @@
     if (!window.Chart) return;
     const hist = state.range === "day";
     const rows = hist ? state.history || [] : state.liveBuf;
-    const labels = rows.map((r) => new Date(hist ? r.ts : r.t).toLocaleTimeString([], hist ? { hour: "2-digit", minute: "2-digit", hourCycle: "h23" } : { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }));
+    const opt = hist ? { hour: "2-digit", minute: "2-digit", hourCycle: "h23" } : { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" };
+    const labels = rows.map((r) => new Date(hist ? r.ts : r.t).toLocaleTimeString([], opt));
     const sets = chartSets(rows, state.chart, hist).map((s) => ({
       label: s.label, data: s.data, borderColor: s.color, backgroundColor: s.color + "22",
       borderWidth: 2, pointRadius: 0, tension: 0.3, fill: state.chart === "battery",
@@ -565,10 +498,7 @@
           responsive: true, maintainAspectRatio: false, animation: false,
           interaction: { mode: "index", intersect: false },
           plugins: { legend: { position: "top", align: "end", labels: { boxWidth: 12, boxHeight: 3 } } },
-          scales: {
-            x: { grid: { display: false }, ticks: { maxTicksLimit: 8, maxRotation: 0 } },
-            y: { grid: { color: css("--rule") }, beginAtZero: false },
-          },
+          scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 8, maxRotation: 0 } }, y: { grid: { color: css("--rule") }, beginAtZero: false } },
         },
       });
     } else {
@@ -596,10 +526,7 @@
       for (let k = start; k < start + 12 && k < w.hourly.time.length; k++) {
         hours.push({ t: w.hourly.time[k].slice(11, 16), rad: w.hourly.shortwave_radiation[k], wind: w.hourly.wind_speed_10m[k], temp: w.hourly.temperature_2m[k], cloud: w.hourly.cloud_cover[k] });
       }
-      state.weather = {
-        hours, radNow: w.current.shortwave_radiation,
-        next: hours[0] ? { cloud: hours[0].cloud, wind: hours[0].wind, rad: hours[0].rad } : null,
-      };
+      state.weather = { hours, radNow: w.current.shortwave_radiation, next: hours[0] ? { cloud: hours[0].cloud, wind: hours[0].wind, rad: hours[0].rad } : null };
       $("heroWeather").textContent = `${Math.round(w.current.temperature_2m)} °C, ${Math.round(w.current.cloud_cover)}% cloud`;
       renderWeather();
       const mins = (s) => +s.slice(11, 13) * 60 + +s.slice(14, 16);
@@ -645,9 +572,8 @@
   // =======================================================
   async function send(ctl, msg) {
     try {
-      ctl.priority = ctl.priority || [...state.control.priority];
       await backend.writeControl(ctl);
-      state.control = { mode: ctl.mode, relays: { ...ctl.relays }, priority: [...ctl.priority] };
+      state.control = { mode: ctl.mode, relays: { ...ctl.relays } };
       renderControl();
       toast(msg + (DEMO ? "" : " The controller applies it within a few seconds."));
     } catch (e) {
@@ -659,30 +585,14 @@
   function wireUi() {
     $("modeManual").addEventListener("click", () => {
       if (state.control.mode === "manual") return;
-      const relays = state.live ? { ...state.live.relays } : { ...state.control.relays };
-      send({ mode: "manual", relays }, "Manual mode on. The sources stay as they are until you change them.");
+      const relays = state.live ? { ...allOff(), ...state.live.relays } : { ...state.control.relays };
+      send({ mode: "manual", relays }, "Manual mode on. Everything stays as it is until you change it.");
     });
     $("modeAuto").addEventListener("click", () => {
       if (state.control.mode === "auto") return;
-      send({ mode: "auto", relays: { ...state.control.relays } }, "Auto mode on. The AI picks a program now.");
+      send({ mode: "auto", relays: { ...state.control.relays } }, "Auto mode on. The ESP32 decides now.");
     });
-    $("modePriority").addEventListener("click", () => {
-      if (state.control.mode === "priority") return;
-      send({ mode: "priority", relays: { ...state.control.relays } }, "Priority mode on. Sources follow your list.");
-    });
-    $("priorityList").addEventListener("click", (e) => {
-      const b = e.target.closest("button[data-move]");
-      if (!b || b.disabled) return;
-      const i = +b.dataset.i, j = i + +b.dataset.move;
-      const order = [...state.control.priority];
-      [order[i], order[j]] = [order[j], order[i]];
-      send({ mode: state.control.mode, relays: { ...state.control.relays }, priority: order },
-        `Priority saved: ${order.map((k, n) => `${n + 1}. ${KEY_NAME[k]}`).join(", ")}.`);
-      setTimeout(() => { const btn = $("priorityList").querySelectorAll("button[data-move]")[j * 2 + (+b.dataset.move > 0 ? 1 : 0)]; if (btn && !btn.disabled) btn.focus(); }, 50);
-    });
-    $("allOffBtn").addEventListener("click", () => {
-      send({ mode: "manual", relays: { battery: false, ac: false, solar: false, wind: false } }, "Everything turned off. Switched to manual mode.");
-    });
+    $("allOffBtn").addEventListener("click", () => send({ mode: "manual", relays: allOff() }, "Everything turned off. Switched to manual mode."));
     document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
       document.querySelectorAll(".tabs button").forEach((x) => x.setAttribute("aria-selected", x === b));
       state.chart = b.dataset.chart;
@@ -718,12 +628,12 @@
   //  START
   // =======================================================
   async function start() {
-    renderPrograms();
-    renderRelays();
+    buildLists();
     wireUi();
+    renderControl();
     loadWeather();
     setInterval(loadWeather, 15 * 60 * 1000);
-    setInterval(() => state.live && render(), 5000); // keeps "offline" status fresh
+    setInterval(() => state.live && render(), 5000);
     if (DEMO) {
       backend = demoBackend();
     } else {

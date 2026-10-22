@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Smart Energy</title>
-  <meta name="description" content="Live control of a solar, wind, battery and AC hybrid power system with an AI auto mode." />
+  <meta name="description" content="Live control of a solar, wind, grid and battery system with three priority outputs and an AI auto mode." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -33,83 +33,108 @@
         <p class="hero-sub" id="headlineSub">Readings appear here as soon as the ESP32 reports in.</p>
         <div class="hero-facts">
           <div><span>Mode</span><strong id="heroMode">–</strong></div>
-          <div><span>Sources on</span><strong id="heroProgram">–</strong></div>
+          <div><span>Outputs on</span><strong id="heroOutputs">–</strong></div>
           <div><span>Sky now</span><strong id="heroWeather">–</strong></div>
         </div>
       </div>
 
-      <figure class="flow" aria-label="Power flow from each source through its relay to the load">
+      <figure class="flow" aria-label="Power flow: sources through their relays to the battery, then to the three priority outputs">
         <svg id="flowSvg" viewBox="0 0 760 340" role="img">
           <title>Power flow diagram</title>
-          <!-- bus -->
-          <rect class="bus" x="462" y="34" width="14" height="282" rx="7"/>
-          <path class="wire" d="M476 175 H600"/>
-          <path class="flowline" id="flow-load" d="M476 175 H600"/>
+          <text class="col-tag" x="46" y="22" text-anchor="middle">Sources</text>
+          <text class="col-tag" x="392" y="22" text-anchor="middle">Battery</text>
+          <text class="col-tag" x="620" y="22" text-anchor="middle">Outputs</text>
 
-          <!-- source rows: wire, flow, relay -->
-          <g class="row" id="row-solar" data-y="55" style="--c: var(--sun)">
-            <path class="wire" d="M226 55 H298 M342 55 H462"/>
-            <path class="flowline" d="M226 55 H462"/>
-            <circle class="contact" cx="300" cy="55" r="4"/><circle class="contact" cx="340" cy="55" r="4"/>
-            <line class="blade" x1="300" y1="55" x2="340" y2="55"/>
-            <g class="node" transform="translate(56 55)">
-              <circle class="node-bg" r="30"/>
-              <g class="icon-sun"><circle r="9"/><path d="M0-17v-5M0 17v5M-17 0h-5M17 0h5M-12-12l-3.5-3.5M12 12l3.5 3.5M-12 12l-3.5 3.5M12-12l3.5-3.5"/></g>
-            </g>
-            <text class="n-name" x="98" y="42">Solar</text>
-            <text class="n-val" x="98" y="70" id="v-solar">– W</text>
+          <!-- buses -->
+          <rect class="bus" x="262" y="44" width="10" height="252" rx="5"/>
+          <rect class="bus" x="474" y="44" width="10" height="252" rx="5"/>
+
+          <!-- source rows -->
+          <g class="row" id="row-solar" data-ox="200" data-oy="70" style="--c: var(--sun)">
+            <path class="wire" d="M178 70 H198 M232 70 H262"/>
+            <path class="flowline" d="M178 70 H262"/>
+            <circle class="contact" cx="200" cy="70" r="4"/><circle class="contact" cx="230" cy="70" r="4"/>
+            <line class="blade" x1="200" y1="70" x2="230" y2="70"/>
+            <g class="node" transform="translate(46 70)"><circle class="node-bg" r="27"/>
+              <g class="icon-sun"><circle r="8"/><path d="M0-15v-4M0 15v4M-15 0h-4M15 0h4M-10.6-10.6l-2.8-2.8M10.6 10.6l2.8 2.8M-10.6 10.6l-2.8 2.8M10.6-10.6l2.8-2.8"/></g></g>
+            <text class="n-name" x="82" y="58">Solar</text>
+            <text class="n-val" x="82" y="82" id="v-solar">– W</text>
           </g>
 
-          <g class="row" id="row-wind" data-y="135" style="--c: var(--wind)">
-            <path class="wire" d="M226 135 H298 M342 135 H462"/>
-            <path class="flowline" d="M226 135 H462"/>
-            <circle class="contact" cx="300" cy="135" r="4"/><circle class="contact" cx="340" cy="135" r="4"/>
-            <line class="blade" x1="300" y1="135" x2="340" y2="135"/>
-            <g class="node" transform="translate(56 135)">
-              <circle class="node-bg" r="30"/>
-              <line class="mast" x1="0" y1="2" x2="0" y2="24"/>
-              <g class="rotor" id="rotor"><path d="M0 0 L-3 -19 Q0 -23 3 -19 Z"/><path d="M0 0 L-3 -19 Q0 -23 3 -19 Z" transform="rotate(120)"/><path d="M0 0 L-3 -19 Q0 -23 3 -19 Z" transform="rotate(240)"/><circle r="3"/></g>
-            </g>
-            <text class="n-name" x="98" y="122">Wind</text>
-            <text class="n-val" x="98" y="150" id="v-wind">– W</text>
+          <g class="row" id="row-wind" data-ox="200" data-oy="170" style="--c: var(--wind)">
+            <path class="wire" d="M178 170 H198 M232 170 H262"/>
+            <path class="flowline" d="M178 170 H262"/>
+            <circle class="contact" cx="200" cy="170" r="4"/><circle class="contact" cx="230" cy="170" r="4"/>
+            <line class="blade" x1="200" y1="170" x2="230" y2="170"/>
+            <g class="node" transform="translate(46 170)"><circle class="node-bg" r="27"/>
+              <line class="mast" x1="0" y1="2" x2="0" y2="22"/>
+              <g class="rotor" id="rotor"><path d="M0 0 L-3 -17 Q0 -21 3 -17 Z"/><path d="M0 0 L-3 -17 Q0 -21 3 -17 Z" transform="rotate(120)"/><path d="M0 0 L-3 -17 Q0 -21 3 -17 Z" transform="rotate(240)"/><circle r="3"/></g></g>
+            <text class="n-name" x="82" y="158">Wind</text>
+            <text class="n-val" x="82" y="182" id="v-wind">– W</text>
           </g>
 
-          <g class="row" id="row-ac" data-y="215" style="--c: var(--ac)">
-            <path class="wire" d="M226 215 H298 M342 215 H462"/>
-            <path class="flowline" d="M226 215 H462"/>
-            <circle class="contact" cx="300" cy="215" r="4"/><circle class="contact" cx="340" cy="215" r="4"/>
-            <line class="blade" x1="300" y1="215" x2="340" y2="215"/>
-            <g class="node" transform="translate(56 215)">
-              <circle class="node-bg" r="30"/>
-              <g class="icon-plug"><rect x="-9" y="-6" width="18" height="14" rx="3"/><path d="M-4-6v-8M4-6v-8M0 8v10"/></g>
-            </g>
-            <text class="n-name" x="98" y="202">AC input</text>
-            <text class="n-val" x="98" y="230" id="v-ac">off</text>
+          <g class="row" id="row-grid" data-ox="200" data-oy="270" style="--c: var(--grid)">
+            <path class="wire" d="M178 270 H198 M232 270 H262"/>
+            <path class="flowline" d="M178 270 H262"/>
+            <circle class="contact" cx="200" cy="270" r="4"/><circle class="contact" cx="230" cy="270" r="4"/>
+            <line class="blade" x1="200" y1="270" x2="230" y2="270"/>
+            <g class="node" transform="translate(46 270)"><circle class="node-bg" r="27"/>
+              <path class="icon-ac" d="M-13 0 q6.5 -13 13 0 t13 0"/></g>
+            <text class="n-name" x="82" y="258">Grid (AC)</text>
+            <text class="n-val" x="82" y="282" id="v-grid">off</text>
           </g>
 
-          <g class="row" id="row-battery" data-y="295" style="--c: var(--battery)">
-            <path class="wire" d="M226 295 H298 M342 295 H462"/>
-            <path class="flowline" d="M226 295 H462"/>
-            <circle class="contact" cx="300" cy="295" r="4"/><circle class="contact" cx="340" cy="295" r="4"/>
-            <line class="blade" x1="300" y1="295" x2="340" y2="295"/>
-            <g class="node" transform="translate(56 295)">
-              <circle class="node-bg" r="30"/>
-              <rect class="bat-shell" x="-10" y="-15" width="20" height="30" rx="3"/>
-              <rect class="bat-cap" x="-4" y="-19" width="8" height="4" rx="1"/>
-              <rect class="bat-fill" id="batFill" x="-7" y="-12" width="14" height="24" rx="1.5"/>
-            </g>
-            <text class="n-name" x="98" y="282">Battery</text>
-            <text class="n-val" x="98" y="310" id="v-battery">– V</text>
+          <!-- charging relay: source bus -> battery -->
+          <g class="row" id="row-charge" data-ox="296" data-oy="170" style="--c: var(--battery)">
+            <path class="wire" d="M272 170 H294 M328 170 H362"/>
+            <path class="flowline" d="M272 170 H362"/>
+            <circle class="contact" cx="296" cy="170" r="4"/><circle class="contact" cx="326" cy="170" r="4"/>
+            <line class="blade" x1="296" y1="170" x2="326" y2="170"/>
+            <text class="relay-tag" x="311" y="200" text-anchor="middle">Charging</text>
           </g>
 
-          <!-- load -->
-          <g class="node load" transform="translate(660 175)">
-            <circle class="node-bg" r="38"/>
-            <path class="icon-home" d="M-16 2 L0 -13 L16 2 M-11 -2 V14 H11 V-2 M-3 14 V5 H3 V14"/>
+          <!-- battery -> output bus -->
+          <g id="row-discharge" style="--c: var(--battery)">
+            <path class="wire" d="M422 170 H474"/>
+            <path class="flowline" d="M422 170 H474"/>
           </g>
-          <text class="n-name" x="660" y="240" text-anchor="middle">Load</text>
-          <text class="n-val" x="660" y="264" text-anchor="middle" id="v-load">– W</text>
-          <text class="relay-tag" x="320" y="24" text-anchor="middle">Relays</text>
+          <g class="node bat" transform="translate(392 170)">
+            <circle class="node-bg" r="30"/>
+            <rect class="bat-shell" x="-10" y="-15" width="20" height="30" rx="3"/>
+            <rect class="bat-cap" x="-4" y="-19" width="8" height="4" rx="1"/>
+            <rect class="bat-fill" id="batFill" x="-7" y="-12" width="14" height="24" rx="1.5"/>
+          </g>
+          <text class="n-val" x="392" y="232" text-anchor="middle" id="v-battery">– V</text>
+          <text class="n-name" x="392" y="254" text-anchor="middle" id="v-battery-sub">–</text>
+
+          <!-- outputs -->
+          <g class="row out" id="row-out1" data-ox="514" data-oy="70" style="--c: var(--out)">
+            <path class="wire" d="M484 70 H512 M546 70 H593"/>
+            <path class="flowline" d="M484 70 H593"/>
+            <circle class="contact" cx="514" cy="70" r="4"/><circle class="contact" cx="544" cy="70" r="4"/>
+            <line class="blade" x1="514" y1="70" x2="544" y2="70"/>
+            <g class="node" transform="translate(620 70)"><circle class="node-bg" r="27"/><text class="rank" y="7" text-anchor="middle">1</text></g>
+            <text class="n-name" x="656" y="58" id="name-out1">Output 1</text>
+            <text class="n-val" x="656" y="82" id="v-out1">off</text>
+          </g>
+          <g class="row out" id="row-out2" data-ox="514" data-oy="170" style="--c: var(--out)">
+            <path class="wire" d="M484 170 H512 M546 170 H593"/>
+            <path class="flowline" d="M484 170 H593"/>
+            <circle class="contact" cx="514" cy="170" r="4"/><circle class="contact" cx="544" cy="170" r="4"/>
+            <line class="blade" x1="514" y1="170" x2="544" y2="170"/>
+            <g class="node" transform="translate(620 170)"><circle class="node-bg" r="27"/><text class="rank" y="7" text-anchor="middle">2</text></g>
+            <text class="n-name" x="656" y="158" id="name-out2">Output 2</text>
+            <text class="n-val" x="656" y="182" id="v-out2">off</text>
+          </g>
+          <g class="row out" id="row-out3" data-ox="514" data-oy="270" style="--c: var(--out)">
+            <path class="wire" d="M484 270 H512 M546 270 H593"/>
+            <path class="flowline" d="M484 270 H593"/>
+            <circle class="contact" cx="514" cy="270" r="4"/><circle class="contact" cx="544" cy="270" r="4"/>
+            <line class="blade" x1="514" y1="270" x2="544" y2="270"/>
+            <g class="node" transform="translate(620 270)"><circle class="node-bg" r="27"/><text class="rank" y="7" text-anchor="middle">3</text></g>
+            <text class="n-name" x="656" y="258" id="name-out3">Output 3</text>
+            <text class="n-val" x="656" y="282" id="v-out3">off</text>
+          </g>
         </svg>
       </figure>
     </div>
@@ -142,14 +167,14 @@
         <p class="sub" id="r-wind-vi">–</p>
       </div>
       <div class="reading r-load">
-        <h3>Load</h3>
-        <p class="big"><span id="r-load-w">–</span><small>W</small></p>
-        <p class="sub" id="r-energy">–</p>
+        <h3>Generated</h3>
+        <p class="big"><span id="r-gen">–</span><small>kWh</small></p>
+        <p class="sub">Sun and wind, in total</p>
       </div>
       <div class="reading r-temp">
         <h3>Temperature</h3>
-        <p class="temps"><span>Roof <b id="r-roof">–</b></span><span>System <b id="r-sys">–</b></span></p>
-        <p class="sub" id="r-temp-note">Limit 60 °C</p>
+        <p class="temps"><span>Panel <b id="r-panel">–</b></span><span>System <b id="r-sys">–</b></span></p>
+        <p class="sub" id="r-temp-note">–</p>
       </div>
     </section>
 
@@ -159,30 +184,25 @@
         <h2 id="ctlTitle">Control</h2>
         <div class="seg" role="radiogroup" aria-label="Mode">
           <button role="radio" data-mode="manual" id="modeManual">Manual</button>
-          <button role="radio" data-mode="priority" id="modePriority">Priority</button>
           <button role="radio" data-mode="auto" id="modeAuto">Auto (AI)</button>
         </div>
       </div>
       <p class="hint" id="modeHint"></p>
 
       <div class="ctl-grid">
-        <div class="ctl-left">
-          <div class="priority" id="priorityBox">
-            <div class="pri-head">
-              <h3>Priority list</h3>
-              <p>Sources turn on from the top until the load is covered.</p>
-            </div>
-            <ol id="priorityList"><!-- filled by app.js --></ol>
+        <div class="priority" id="outputsBox">
+          <div class="pri-head">
+            <h3>Priority outputs</h3>
+            <p>When energy is short, Output 3 turns off first, then Output 2. Output 1 stays on longest.</p>
           </div>
-          <h3 class="presets-title">Programs</h3>
-          <div class="programs" id="programs"><!-- filled by app.js --></div>
+          <ol id="outputList"><!-- filled by app.js --></ol>
         </div>
 
         <div class="relays">
-          <h3>Relays</h3>
+          <h3>Sources and charging</h3>
           <div id="relayList"><!-- filled by app.js --></div>
           <button class="all-off" id="allOffBtn">Turn everything off</button>
-          <p class="fine">Safety limits on the ESP32 always win: low battery cuts the battery, high battery cuts sun and wind, over-temperature turns everything off.</p>
+          <p class="fine" id="safetyNote">Safety limits on the ESP32 always win.</p>
         </div>
       </div>
     </section>
@@ -190,7 +210,7 @@
     <!-- ================= AI ================= -->
     <section class="ai" aria-labelledby="aiTitle">
       <div class="sec-head">
-        <h2 id="aiTitle">Why auto mode chose <span id="aiChoice">–</span></h2>
+        <h2 id="aiTitle">Why auto mode keeps <span id="aiChoice">–</span> on</h2>
       </div>
       <div class="ai-grid">
         <div class="ai-conf">

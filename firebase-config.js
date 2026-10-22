@@ -1,7 +1,5 @@
 // ============================================================
-//  Smart Energy dashboard settings
-//  Firebase console -> Project settings -> General -> "Your apps"
-//  -> Web app -> copy the firebaseConfig values here.
+//  Smart Energy dashboard settings  (v2)
 //  While apiKey starts with "YOUR", the dashboard runs in DEMO mode
 //  with simulated data, so you can try the UI first.
 // ============================================================
@@ -20,13 +18,14 @@ window.SEMS_CONFIG = {
   // Site location (weather + sky colour). Same as config.h
   site: { name: "Colombo", latitude: 6.9271, longitude: 79.8612 },
 
-  // Must match PROGRAM_RELAYS in config.h   {battery, ac, solar, wind}
-  programs: {
-    1: { name: "Renewable only", note: "Sun and wind feed the load", relays: { battery: false, ac: false, solar: true, wind: true } },
-    2: { name: "Renewable + battery", note: "Battery helps sun and wind", relays: { battery: true, ac: false, solar: true, wind: true } },
-    3: { name: "AC backup", note: "AC input feeds the load", relays: { battery: false, ac: true, solar: false, wind: false } },
-  },
+  // Names shown for the three priority outputs (change to what they power,
+  // for example "Lights", "Fan", "Water pump")
+  outputs: { out1: "Output 1", out2: "Output 2", out3: "Output 3" },
 
-  // Must match the safety limits in config.h (used for colours and text only)
-  limits: { batLow: 11.0, batHigh: 14.4, sysTempMax: 60 },
+  // Used only until the ESP32 sends its own limits from config.h
+  limits: {
+    out1: 11.5, out2: 12.4, out2w: 10, out3: 13.5, sunGood: 12,
+    gridOn: 11.8, gridOff: 12.8, chargeOn: 13.6, chargeOff: 14.4,
+    critical: 11.0, tempMax: 60,
+  },
 };
