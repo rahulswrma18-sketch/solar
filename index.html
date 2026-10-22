@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Smart Energy</title>
-  <meta name="description" content="Live control of a solar, wind, battery and DC hybrid power system with an AI auto mode." />
+  <meta name="description" content="Live control of a solar, wind, battery and AC hybrid power system with an AI auto mode." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -33,7 +33,7 @@
         <p class="hero-sub" id="headlineSub">Readings appear here as soon as the ESP32 reports in.</p>
         <div class="hero-facts">
           <div><span>Mode</span><strong id="heroMode">–</strong></div>
-          <div><span>Program</span><strong id="heroProgram">–</strong></div>
+          <div><span>Sources on</span><strong id="heroProgram">–</strong></div>
           <div><span>Sky now</span><strong id="heroWeather">–</strong></div>
         </div>
       </div>
@@ -74,7 +74,7 @@
             <text class="n-val" x="98" y="150" id="v-wind">– W</text>
           </g>
 
-          <g class="row" id="row-dc" data-y="215" style="--c: var(--dc)">
+          <g class="row" id="row-ac" data-y="215" style="--c: var(--ac)">
             <path class="wire" d="M226 215 H298 M342 215 H462"/>
             <path class="flowline" d="M226 215 H462"/>
             <circle class="contact" cx="300" cy="215" r="4"/><circle class="contact" cx="340" cy="215" r="4"/>
@@ -83,8 +83,8 @@
               <circle class="node-bg" r="30"/>
               <g class="icon-plug"><rect x="-9" y="-6" width="18" height="14" rx="3"/><path d="M-4-6v-8M4-6v-8M0 8v10"/></g>
             </g>
-            <text class="n-name" x="98" y="202">DC input</text>
-            <text class="n-val" x="98" y="230" id="v-dc">off</text>
+            <text class="n-name" x="98" y="202">AC input</text>
+            <text class="n-val" x="98" y="230" id="v-ac">off</text>
           </g>
 
           <g class="row" id="row-battery" data-y="295" style="--c: var(--battery)">
@@ -159,13 +159,24 @@
         <h2 id="ctlTitle">Control</h2>
         <div class="seg" role="radiogroup" aria-label="Mode">
           <button role="radio" data-mode="manual" id="modeManual">Manual</button>
+          <button role="radio" data-mode="priority" id="modePriority">Priority</button>
           <button role="radio" data-mode="auto" id="modeAuto">Auto (AI)</button>
         </div>
       </div>
       <p class="hint" id="modeHint"></p>
 
       <div class="ctl-grid">
-        <div class="programs" id="programs"><!-- filled by app.js --></div>
+        <div class="ctl-left">
+          <div class="priority" id="priorityBox">
+            <div class="pri-head">
+              <h3>Priority list</h3>
+              <p>Sources turn on from the top until the load is covered.</p>
+            </div>
+            <ol id="priorityList"><!-- filled by app.js --></ol>
+          </div>
+          <h3 class="presets-title">Programs</h3>
+          <div class="programs" id="programs"><!-- filled by app.js --></div>
+        </div>
 
         <div class="relays">
           <h3>Relays</h3>

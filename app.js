@@ -9,9 +9,12 @@
 
   const C = window.SEMS_CONFIG;
   const DEMO = !C || !C.firebase || String(C.firebase.apiKey).startsWith("YOUR");
-  const KEYS = ["battery", "dc", "solar", "wind"];
-  const KEY_NAME = { battery: "Battery", dc: "DC input", solar: "Solar", wind: "Wind" };
-  const KEY_LETTER = { battery: "B", dc: "DC", solar: "S", wind: "W" };
+  const KEYS = ["battery", "ac", "solar", "wind"];
+  const KEY_NAME = { battery: "Battery", ac: "AC input", solar: "Solar", wind: "Wind" };
+  const KEY_LETTER = { battery: "B", ac: "AC", solar: "S", wind: "W" };
+  const KEY_COLOR = { battery: "var(--battery)", ac: "var(--ac)", solar: "var(--sun)", wind: "var(--wind)" };
+  const MODE_LABEL = { manual: "Manual", priority: "Priority", auto: "Auto (AI)" };
+  const RANK = ["1<small>st</small>", "2<small>nd</small>", "3<small>rd</small>", "4<small>th</small>"];
   const FIREBASE_VERSION = "10.12.2";
   const OFFLINE_AFTER_MS = 15000;
   const LIVE_POINTS = 300; // 10 min at 2 s
@@ -23,7 +26,7 @@
 
   const state = {
     live: null,
-    control: { mode: "auto", relays: { battery: false, dc: false, solar: false, wind: false } },
+    control: { mode: "priority", relays: { battery: false, ac: false, solar: false, wind: false }, priority: ["solar", "wind", "battery", "ac"] },
     events: [],
     liveBuf: [],
     history: null,
@@ -85,6 +88,7 @@
         await dbM.set(path("control"), {
           mode: ctl.mode,
           relays: ctl.relays,
+          priority: ctl.priority,
           by: auth.currentUser ? auth.currentUser.email : "unknown",
           ts: dbM.serverTimestamp(),
         });
@@ -99,8 +103,9 @@
   // ---------- Demo (a small simulated ESP32) ----------
   function demoBackend() {
     $("demoBanner").hidden = false;
-    let ctl = { mode: "auto", relays: { battery: false, dc: false, solar: true, wind: true } };
-    let batV = 12.55, windNow = 9, energy = 0.412, aiProg = 1, aiConf = 0.87, lastAi = 0;
+    let ctl = { mode: "priority", relays: { battery: false, ac: false, solar: true, wind: true }, priority: ["solar", "wind", "battery", "ac"] };
+    let batV = 12.55, windNow = 9, energy = 0.412, aiProg = 1, aiConf = 0.87, lastAi = 0, prioN = 1, lastPrio = 0;
+    let lastW = { solar: 0, wind: 0, battery: 0, ac: 0 }, prioAvail = { solar: true, wind: true, battery: true, ac: true };
     const events = [{ ts: Date.now() - 60000, level: "info", msg: "Controller started (demo)" }];
 
     function sunNow() {
@@ -111,7 +116,23 @@
     }
     function tick() {
       windNow = clamp(windNow + (Math.random() - 0.5) * 3, 0, 40);
-      const relays = { ...(ctl.mode === "auto" ? C.programs[aiProg].relays : ctl.relays) };
+      // priority mode: same logic as updatePriority() on the ESP32
+      const sunW = 20 * sunNow() / 1000, windCap = 30 * Math.pow(clamp((windNow - 8) / 32, 0, 1), 3) * 4;
+      prioAvail = { solar: sunW > 0.5, wind: windCap > 0.3, battery: batV >= 12.0, ac: true };
+      const avail = ctl.priority.filter((k) => prioAvail[k]);
+      const loadEst = 9.5;
+      if (ctl.mode === "priority" && Date.now() - lastPrio > 4000) {
+        prioN = clamp(prioN, avail.length ? 1 : 0, avail.length);
+        const cap = { solar: sunW, wind: windCap, battery: 6, ac: 1000 };
+        const supplied = avail.slice(0, prioN).reduce((s, k) => s + cap[k], 0);
+        const lastCap = prioN ? cap[avail[prioN - 1]] : 0;
+        if (prioN < avail.length && supplied < loadEst * 1.05) prioN++;
+        else if (prioN > 1 && supplied - lastCap >= loadEst * 1.25) prioN--;
+        lastPrio = Date.now();
+      }
+      const prioRelays = { battery: false, ac: false, solar: false, wind: false };
+      avail.slice(0, prioN).forEach((k) => (prioRelays[k] = true));
+      const relays = { ...(ctl.mode === "auto" ? C.programs[aiProg].relays : ctl.mode === "priority" ? prioRelays : ctl.relays) };
       const solarW = relays.solar ? 20 * sunNow() / 1000 * (0.9 + Math.random() * 0.1) : 0;
       const windW = relays.wind ? 30 * Math.pow(clamp((windNow - 8) / 32, 0, 1), 3) * 4 : 0;
       const loadW = 7 + Math.random() * 5;
@@ -143,6 +164,7 @@
         mode: ctl.mode,
         program: matchProgram(relays),
         relays,
+        priority: [...ctl.priority], prioActive: prioN, prioAvail: { ...prioAvail },
         ai: { program: aiProg, confidence: aiConf, source: "model", model: "RF 15 trees (demo)", fc_cloud: fc.cloud, fc_wind: fc.wind, fc_rad: fc.rad, fc_valid: true },
         safety: { batLow: false, batHigh: false, overTemp: false, sensorFault: false },
       });
@@ -154,8 +176,9 @@
       async writeControl(next) {
         const was = ctl.mode;
         ctl = JSON.parse(JSON.stringify(next));
-        if (was !== ctl.mode) events.unshift({ ts: Date.now(), level: "info", msg: ctl.mode === "auto" ? "Switched to AUTO mode" : "Switched to MANUAL mode" });
+        if (was !== ctl.mode) events.unshift({ ts: Date.now(), level: "info", msg: `Switched to ${ctl.mode.toUpperCase()} mode` });
         if (ctl.mode === "auto") lastAi = 0;
+        if (ctl.mode === "priority") { prioN = 1; lastPrio = 0; }
         onControl(ctl);
         onEvents(events.slice(0, 40));
         setTimeout(tick, 600);
@@ -216,7 +239,8 @@
   }
   function onControl(ctl) {
     if (!ctl) return;
-    state.control = { mode: ctl.mode || "auto", relays: { ...state.control.relays, ...(ctl.relays || {}) } };
+    const pr = Array.isArray(ctl.priority) && ctl.priority.length === 4 ? ctl.priority : state.control.priority;
+    state.control = { mode: ctl.mode || "priority", relays: { ...state.control.relays, ...(ctl.relays || {}) }, priority: [...pr] };
     renderControl();
   }
   function onEvents(list) {
@@ -239,23 +263,23 @@
     if (s.sensorFault) return ["Battery sensor is not responding", "The battery relay is held off until the INA219 answers again."];
     if (KEYS.every((k) => !r[k])) return ["Everything is off", "No source is connected to the load."];
     let h;
-    if (r.dc && !r.battery && !solarOn && !windOn) h = "Running on DC backup";
+    if (r.ac && !r.battery && !solarOn && !windOn) h = "Running on AC backup";
     else if (r.battery && (solarOn || windOn)) h = "Battery is helping " + (solarOn && windOn ? "the sun and wind" : solarOn ? "the panel" : "the turbine");
     else if (r.battery) h = "Running on the battery";
     else if (solarOn && windOn) h = "Running on sun and wind";
     else if (solarOn) h = "Running on sunshine";
     else if (windOn) h = "Running on wind";
     else if (r.solar || r.wind) h = "Waiting for sun or wind";
-    else h = "Running on DC backup";
-    if (r.dc && h !== "Running on DC backup") h += ", with DC backup";
+    else h = "Running on AC backup";
+    if (r.ac && h !== "Running on AC backup") h += ", with AC backup";
     if (s.batLow) h = "Battery is low, so it's cut off";
     if (s.batHigh) h = "Battery is full, so sun and wind are paused";
 
     const renew = (+l.solar.w || 0) + (+l.wind.w || 0);
     let sub = `The load uses ${fmt(l.load.w)} W and sun and wind give ${fmt(renew)} W. `;
-    sub += l.mode === "auto"
-      ? `Auto mode picked ${programName(l.ai?.program)} with ${Math.round((+l.ai?.confidence || 0) * 100)}% agreement.`
-      : "Manual mode: you're choosing the sources.";
+    if (l.mode === "auto") sub += `Auto mode picked ${programName(l.ai?.program)} with ${Math.round((+l.ai?.confidence || 0) * 100)}% agreement.`;
+    else if (l.mode === "priority") { const n = l.prioActive || 0; sub += n === 0 ? "Priority mode: no source on your list is available." : n === 1 ? "Priority mode is using the 1st available source on your list." : `Priority mode is using the top ${n} available sources on your list.`; }
+    else sub += "Manual mode: you're choosing the sources.";
     return [h, sub];
   }
 
@@ -273,9 +297,9 @@
     const [h, sub] = online ? headline(l) : ["Controller is offline", `The last reading arrived ${ago(l.ts)}. Check the ESP32's power and Wi-Fi.`];
     $("headline").textContent = h;
     $("headlineSub").textContent = sub;
-    $("heroMode").textContent = l.mode === "auto" ? "Auto (AI)" : "Manual";
-    const p = l.program;
-    $("heroProgram").textContent = p > 0 && C.programs[p] ? `${p}. ${C.programs[p].name}` : programName(p);
+    $("heroMode").textContent = MODE_LABEL[l.mode] || "–";
+    const onList = KEYS.filter((k) => l.relays && l.relays[k]).map((k) => KEY_NAME[k]);
+    $("heroProgram").textContent = onList.length ? onList.join(" + ") : "None";
 
     renderFlow(l, online);
     renderReadings(l);
@@ -288,7 +312,7 @@
 
   function renderFlow(l, online) {
     const r = l.relays || {};
-    const power = { solar: +l.solar?.w || 0, wind: +l.wind?.w || 0, battery: Math.abs(+l.battery?.w || 0), dc: r.dc ? 10 : 0 };
+    const power = { solar: +l.solar?.w || 0, wind: +l.wind?.w || 0, battery: Math.abs(+l.battery?.w || 0), ac: r.ac ? 10 : 0 };
     for (const k of KEYS) {
       const row = $(`row-${k}`);
       row.style.setProperty("--y", row.dataset.y + "px");
@@ -308,7 +332,7 @@
 
     $("v-solar").textContent = `${fmt(l.solar?.w)} W`;
     $("v-wind").textContent = `${fmt(l.wind?.w)} W`;
-    $("v-dc").textContent = r.dc ? "on" : "off";
+    $("v-ac").textContent = r.ac ? "on" : "off";
     $("v-battery").textContent = `${fmt(l.battery?.v, 2)} V`;
     $("v-load").textContent = `${fmt(l.load?.w)} W`;
     const soc = clamp(+l.battery?.soc || 0, 0, 100), hgt = 24 * soc / 100;
@@ -358,7 +382,7 @@
       const el = document.createElement("div");
       el.className = "prog";
       el.dataset.prog = n;
-      const pat = KEYS.map((k) => `<span class="${p.relays[k] ? "on" : ""}" style="--c: var(--${k === "dc" ? "dc" : k === "solar" ? "sun" : k})" title="${KEY_NAME[k]} ${p.relays[k] ? "on" : "off"}">${KEY_LETTER[k]}</span>`).join("");
+      const pat = KEYS.map((k) => `<span class="${p.relays[k] ? "on" : ""}" style="--c: var(--${k === "ac" ? "ac" : k === "solar" ? "sun" : k})" title="${KEY_NAME[k]} ${p.relays[k] ? "on" : "off"}">${KEY_LETTER[k]}</span>`).join("");
       el.innerHTML = `
         <div class="pattern" aria-hidden="true">${pat}</div>
         <div><h3>Program ${n}: ${p.name}<span class="badge" hidden>AI choice</span></h3><p>${p.note}</p></div>
@@ -369,7 +393,7 @@
       const b = e.target.closest("button.use");
       if (!b) return;
       const p = C.programs[b.dataset.prog];
-      send({ mode: "manual", relays: { ...p.relays } }, `Program ${b.dataset.prog} sent.` + (state.control.mode === "auto" ? " Switched to manual mode." : ""));
+      send({ mode: "manual", relays: { ...p.relays } }, `Program ${b.dataset.prog} sent.` + (state.control.mode !== "manual" ? " Switched to manual mode." : ""));
     });
   }
 
@@ -389,19 +413,48 @@
     box.addEventListener("change", (e) => {
       const k = e.target.dataset.key;
       if (!k) return;
-      const base = state.control.mode === "auto" && state.live ? state.live.relays : state.control.relays;
+      const base = state.control.mode !== "manual" && state.live ? state.live.relays : state.control.relays;
       const relays = { ...base, [k]: e.target.checked };
-      send({ mode: "manual", relays }, `${KEY_NAME[k]} turned ${e.target.checked ? "on" : "off"}.` + (state.control.mode === "auto" ? " Switched to manual mode." : ""));
+      send({ mode: "manual", relays }, `${KEY_NAME[k]} turned ${e.target.checked ? "on" : "off"}.` + (state.control.mode !== "manual" ? " Switched to manual mode." : ""));
+    });
+  }
+
+  function renderPriority() {
+    const ctl = state.control, l = state.live, ol = $("priorityList");
+    const live = ctl.mode === "priority";
+    $("priorityBox").classList.toggle("live", live);
+    ol.innerHTML = "";
+    ctl.priority.forEach((k, i) => {
+      const avail = l?.prioAvail ? l.prioAvail[k] !== false : true;
+      const on = !!(l?.relays && l.relays[k]);
+      let stateTxt;
+      if (!live) stateTxt = "Used in Priority mode";
+      else if (!avail) stateTxt = k === "battery" ? "Not available, battery below 12.0 V" : "Not available right now";
+      else stateTxt = on ? "Feeding the load" : "Standby, not needed now";
+      const li = document.createElement("li");
+      li.className = "pri-item" + (live && on ? " feeding" : "") + (live && !avail ? " unavailable" : "");
+      li.style.setProperty("--c", KEY_COLOR[k]);
+      li.innerHTML = `<span class="pri-rank">${RANK[i]}</span>
+        <span class="pri-name">${KEY_NAME[k]}<span class="pri-state">${stateTxt}</span></span>
+        <span class="pri-move">
+          <button data-move="-1" data-i="${i}" ${i === 0 ? "disabled" : ""} aria-label="Move ${KEY_NAME[k]} up">&#8593;</button>
+          <button data-move="1" data-i="${i}" ${i === 3 ? "disabled" : ""} aria-label="Move ${KEY_NAME[k]} down">&#8595;</button>
+        </span>`;
+      ol.appendChild(li);
     });
   }
 
   function renderControl() {
     const ctl = state.control, l = state.live;
     $("modeManual").setAttribute("aria-checked", ctl.mode === "manual");
+    $("modePriority").setAttribute("aria-checked", ctl.mode === "priority");
     $("modeAuto").setAttribute("aria-checked", ctl.mode === "auto");
-    $("modeHint").textContent = ctl.mode === "auto"
-      ? "The AI on the ESP32 picks a program every minute. Pick a program or flip a relay to take over in manual mode."
-      : "You choose the sources. Switch to Auto to let the AI decide.";
+    $("modeHint").textContent = {
+      auto: "The AI on the ESP32 picks a program every minute. Pick a program or flip a relay to take over in manual mode.",
+      priority: "Sources turn on in your order until the load is covered. Use the arrows to change the order.",
+      manual: "You choose each source. Switch to Priority or Auto to let the system decide.",
+    }[ctl.mode];
+    renderPriority();
 
     const active = l ? l.program : null, aiProg = l?.ai?.program;
     document.querySelectorAll(".prog").forEach((el) => {
@@ -411,9 +464,9 @@
       el.querySelector(".use").textContent = n === active ? "Active" : "Use";
     });
 
-    const shown = ctl.mode === "auto" && l ? l.relays : ctl.relays;
+    const shown = ctl.mode !== "manual" && l ? l.relays : ctl.relays;
     const s = l?.safety || {};
-    const forced = { battery: s.batLow || s.sensorFault || s.overTemp, dc: s.overTemp, solar: s.batHigh || s.overTemp, wind: s.batHigh || s.overTemp };
+    const forced = { battery: s.batLow || s.sensorFault || s.overTemp, ac: s.overTemp, solar: s.batHigh || s.overTemp, wind: s.batHigh || s.overTemp };
     for (const k of KEYS) {
       const sw = $(`sw-${k}`);
       if (!sw) continue;
@@ -592,8 +645,9 @@
   // =======================================================
   async function send(ctl, msg) {
     try {
+      ctl.priority = ctl.priority || [...state.control.priority];
       await backend.writeControl(ctl);
-      state.control = { mode: ctl.mode, relays: { ...ctl.relays } };
+      state.control = { mode: ctl.mode, relays: { ...ctl.relays }, priority: [...ctl.priority] };
       renderControl();
       toast(msg + (DEMO ? "" : " The controller applies it within a few seconds."));
     } catch (e) {
@@ -612,8 +666,22 @@
       if (state.control.mode === "auto") return;
       send({ mode: "auto", relays: { ...state.control.relays } }, "Auto mode on. The AI picks a program now.");
     });
+    $("modePriority").addEventListener("click", () => {
+      if (state.control.mode === "priority") return;
+      send({ mode: "priority", relays: { ...state.control.relays } }, "Priority mode on. Sources follow your list.");
+    });
+    $("priorityList").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-move]");
+      if (!b || b.disabled) return;
+      const i = +b.dataset.i, j = i + +b.dataset.move;
+      const order = [...state.control.priority];
+      [order[i], order[j]] = [order[j], order[i]];
+      send({ mode: state.control.mode, relays: { ...state.control.relays }, priority: order },
+        `Priority saved: ${order.map((k, n) => `${n + 1}. ${KEY_NAME[k]}`).join(", ")}.`);
+      setTimeout(() => { const btn = $("priorityList").querySelectorAll("button[data-move]")[j * 2 + (+b.dataset.move > 0 ? 1 : 0)]; if (btn && !btn.disabled) btn.focus(); }, 50);
+    });
     $("allOffBtn").addEventListener("click", () => {
-      send({ mode: "manual", relays: { battery: false, dc: false, solar: false, wind: false } }, "Everything turned off. Switched to manual mode.");
+      send({ mode: "manual", relays: { battery: false, ac: false, solar: false, wind: false } }, "Everything turned off. Switched to manual mode.");
     });
     document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
       document.querySelectorAll(".tabs button").forEach((x) => x.setAttribute("aria-selected", x === b));
